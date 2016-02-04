@@ -2,6 +2,8 @@
 Android Camera2Raw Sample
 ===================================
 
+bob sang
+
 This sample demonstrates using the Camera2 API to capture a JPEG and RAW sensor frame.
 Check the source code to see a typical example of how to display the camera preview;
 run auto-focus, auto-exposure metering, and auto-white-balance; capture a JPEG and
