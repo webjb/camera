@@ -30,6 +30,7 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.media.ImageWriter;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.AsyncTask;
@@ -232,6 +233,8 @@ public class Camera2RawFragment extends Fragment
      */
     private RefCountedAutoCloseable<ImageReader> mRawImageReader;
 
+    private ImageWriter mImageWriter;
+
     /**
      * Whether or not the currently configured camera device is fixed-focus.
      */
@@ -401,10 +404,6 @@ public class Camera2RawFragment extends Fragment
 
     };
 
-    /**
-     * A {@link CameraCaptureSession.CaptureCallback} that handles the still JPEG and RAW capture
-     * request.
-     */
     private final CameraCaptureSession.CaptureCallback mCaptureCallback
             = new CameraCaptureSession.CaptureCallback() {
         @Override
@@ -561,12 +560,10 @@ public class Camera2RawFragment extends Fragment
         try {
             // Find a CameraDevice that supports RAW captures, and configure state.
             for (String cameraId : manager.getCameraIdList()) {
-                CameraCharacteristics characteristics
-                        = manager.getCameraCharacteristics(cameraId);
+                CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
 
                 // We only use a camera that supports RAW in this sample.
-                if (!contains(characteristics.get(
-                                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                if (!contains(characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
                         CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
                     continue;
                 }
@@ -726,6 +723,10 @@ public class Camera2RawFragment extends Fragment
                     mRawImageReader.close();
                     mRawImageReader = null;
                 }
+                if( null != mImageWriter) {
+                    mImageWriter.close();
+                    mImageWriter = null;
+                }
             }
         } catch (InterruptedException e) {
             throw new RuntimeException("Interrupted while trying to lock camera closing.", e);
@@ -776,9 +777,8 @@ public class Camera2RawFragment extends Fragment
             Surface surface = new Surface(texture);
 
             // We set up a CaptureRequest.Builder with the output Surface.
-            mPreviewRequestBuilder
-                    = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-            mPreviewRequestBuilder.addTarget(surface);
+            mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            //mPreviewRequestBuilder.addTarget(surface);
             mPreviewRequestBuilder.addTarget(mRawImageReader.get().getSurface());
 
             // Here, we create a CameraCaptureSession for camera preview.
@@ -814,9 +814,16 @@ public class Camera2RawFragment extends Fragment
                         }
                     }, mBackgroundHandler
             );
+            try {
+                mImageWriter =  ImageWriter.newInstance(surface,5);
+            } catch (IllegalStateException e) {
+                e.printStackTrace();
+            }
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
+
+
     }
 
     /**
@@ -1150,6 +1157,21 @@ public class Camera2RawFragment extends Fragment
 //                pendingQueue.remove(entry.getKey());
                 return;
             }
+//            mImageWriter.queueInputImage(image);
+
+            Image imageInput;
+            try {
+                imageInput = mImageWriter.dequeueInputImage();
+                int format = image.getFormat();
+                int formatInput = imageInput.getFormat();
+                Log.d(TAG, "bob format=" + format + "height="+image.getHeight() + "width="+ image.getWidth());
+                Log.d(TAG, "bob input="+formatInput +"height="+imageInput.getHeight() + "width="+ imageInput.getWidth());
+
+                imageInput.close();
+            } catch (IllegalStateException e) {
+               Log.e(TAG, "Too many images queued for saving, dropping image for request: ");
+            }
+
 
             image.close();
             // bob
