@@ -28,6 +28,7 @@ import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.DngCreator;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.hardware.camera2.params.InputConfiguration;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.ImageWriter;
@@ -235,14 +236,10 @@ public class Camera2RawFragment extends Fragment
 
     private ImageWriter mImageWriter;
 
-    /**
-     * Whether or not the currently configured camera device is fixed-focus.
-     */
+    // Whether or not the currently configured camera device is fixed-focus.
     private boolean mNoAFRun = false;
 
-    /**
-     * Number of pending user requests to capture a photo.
-     */
+    // Number of pending user requests to capture a photo.
     private int mPendingUserCaptures = 0;
 
      /**
@@ -250,16 +247,8 @@ public class Camera2RawFragment extends Fragment
      */
     private final TreeMap<Integer, ImageSaver.ImageSaverBuilder> mRawResultQueue = new TreeMap<>();
 
-    /**
-     * {@link CaptureRequest.Builder} for the camera preview
-     */
     private CaptureRequest.Builder mPreviewRequestBuilder;
 
-    /**
-     * The state of the camera device.
-     *
-     * @see #mPreCaptureCallback
-     */
     private int mState = STATE_CLOSED;
 
     /**
@@ -318,6 +307,77 @@ public class Camera2RawFragment extends Fragment
         }
 
     };
+
+    /**
+     * Retrieve the next {@link Image} from a reference counted {@link ImageReader}, retaining
+     * that {@link ImageReader} until that {@link Image} is no longer in use, and set this
+     * {@link Image} as the result for the next request in the queue of pending requests.  If
+     * all necessary information is available, begin saving the image to a file in a background
+     * thread.
+     *
+     * @param pendingQueue the currently active requests.
+     * @param reader       a reference counted wrapper containing an {@link ImageReader} from which
+     *                     to acquire an image.
+     */
+    private void dequeueAndSaveImage(TreeMap<Integer, ImageSaver.ImageSaverBuilder> pendingQueue,
+                                     RefCountedAutoCloseable<ImageReader> reader) {
+        synchronized (mCameraStateLock) {
+
+
+            // Increment reference count to prevent ImageReader from being closed while we
+            // are saving its Images in a background thread (otherwise their resources may
+            // be freed while we are writing to a file).
+            if (reader == null || reader.getAndRetain() == null) {
+                Log.e(TAG, "Paused the activity before we could save the image," +
+                        " ImageReader already closed.");
+                //              pendingQueue.remove(entry.getKey());
+                return;
+            }
+
+            Image image;
+            try {
+                image = reader.get().acquireLatestImage();
+            } catch (IllegalStateException e) {
+                Log.e(TAG, "Too many images queued for saving, dropping image for request: ");
+//                        entry.getKey());
+//                pendingQueue.remove(entry.getKey());
+                return;
+            }
+            /*
+            if( mImageWriter == null) {
+                try {
+                    Log.d(TAG, "bob imageWrite create start...");
+                    mImageWriter = ImageWriter.newInstance(mRawImageReader.get().getSurface(), 5);
+                    Log.d(TAG, "bob imageWrite create OK");
+                } catch (IllegalStateException e) {
+                    e.printStackTrace();
+                }
+            }
+          */
+
+//            mImageWriter.queueInputImage(image);
+/*
+            Image imageInput;
+            try {
+                imageInput = mImageWriter.dequeueInputImage();
+                int format = image.getFormat();
+                int formatInput = imageInput.getFormat();
+                Log.d(TAG, "bob format=" + format + "height="+image.getHeight() + "width="+ image.getWidth());
+                Log.d(TAG, "bob input="+formatInput +"height="+imageInput.getHeight() + "width="+ imageInput.getWidth());
+
+                imageInput.close();
+            } catch (IllegalStateException e) {
+               Log.e(TAG, "Too many images queued for saving, dropping image for request: ");
+            }
+*/
+
+            image.close();
+            // bob
+//            builder.setRefCountedReader(reader).setImage(image);
+
+//            handleCompletionLocked(entry.getKey(), builder, pendingQueue);
+        }
+    }
 
     private final ImageReader.OnImageAvailableListener mOnRawImageAvailableListener
             = new ImageReader.OnImageAvailableListener() {
@@ -409,7 +469,6 @@ public class Camera2RawFragment extends Fragment
         @Override
         public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request,
                                      long timestamp, long frameNumber) {
-            // bob
             Log.d(TAG, "bob onCaptureStarted");
 
         }
@@ -439,18 +498,105 @@ public class Camera2RawFragment extends Fragment
 
     };
 
+
     /**
-     * A {@link Handler} for showing {@link Toast}s on the UI thread.
+     * Creates a new {@link CameraCaptureSession} for camera preview.
+     * <p/>
+     * Call this only with {@link #mCameraStateLock} held.
      */
-    private final Handler mMessageHandler = new Handler(Looper.getMainLooper()) {
-        @Override
-        public void handleMessage(Message msg) {
-            Activity activity = getActivity();
-            if (activity != null) {
-                Toast.makeText(activity, (String) msg.obj, Toast.LENGTH_SHORT).show();
-            }
+    private void createCameraPreviewSessionLocked() {
+        try {
+            SurfaceTexture texture = mTextureView.getSurfaceTexture();
+            // We configure the size of default buffer to be the size of camera preview we want.
+            texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+
+            // This is the output Surface we need to start preview.
+            Surface surface = new Surface(texture);
+
+            // We set up a CaptureRequest.Builder with the output Surface.
+            mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            mPreviewRequestBuilder.addTarget(surface);
+            mPreviewRequestBuilder.addTarget(mRawImageReader.get().getSurface());
+
+            Log.d(TAG, "bob previewSize:width="+ mPreviewSize.getWidth()+ "height="+ mPreviewSize.getHeight());
+
+            InputConfiguration inputConfig = new InputConfiguration(mPreviewSize.getWidth(),
+                    mPreviewSize.getHeight(), ImageFormat.YUV_420_888);
+
+            mCameraDevice.createReprocessableCaptureSession(inputConfig,
+//            mCameraDevice.createCaptureSession(
+                    Arrays.asList(surface, mRawImageReader.get().getSurface()), new CameraCaptureSession.StateCallback() {
+
+                        @Override
+                        public void onConfigured(CameraCaptureSession cameraCaptureSession) {
+                            synchronized (mCameraStateLock) {
+                                // The camera is already closed
+                                if (null == mCameraDevice) {
+                                    return;
+                                }
+
+                                try {
+                                    setup3AControlsLocked(mPreviewRequestBuilder);
+                                    // Finally, we start displaying the camera preview.
+                                    cameraCaptureSession.setRepeatingRequest(
+                                            mPreviewRequestBuilder.build(),
+                                            mPreCaptureCallback, mBackgroundHandler);
+                                    mState = STATE_PREVIEW;
+                                } catch (CameraAccessException | IllegalStateException e) {
+                                    e.printStackTrace();
+                                    return;
+                                }
+                                // When the session is ready, we start displaying the preview.
+                                mCaptureSession = cameraCaptureSession;
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession cameraCaptureSession) {
+                            showToast("Failed to configure camera.");
+                        }                    }, mBackgroundHandler);
+
+
+
+/*
+            // Here, we create a CameraCaptureSession for camera preview.
+            mCameraDevice.createCaptureSession(Arrays.asList(surface,
+                            mRawImageReader.get().getSurface()), new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(CameraCaptureSession cameraCaptureSession) {
+                            synchronized (mCameraStateLock) {
+                                // The camera is already closed
+                                if (null == mCameraDevice) {
+                                    return;
+                                }
+
+                                try {
+                                    setup3AControlsLocked(mPreviewRequestBuilder);
+                                    // Finally, we start displaying the camera preview.
+                                    cameraCaptureSession.setRepeatingRequest(
+                                            mPreviewRequestBuilder.build(),
+                                            mPreCaptureCallback, mBackgroundHandler);
+                                    mState = STATE_PREVIEW;
+                                } catch (CameraAccessException | IllegalStateException e) {
+                                    e.printStackTrace();
+                                    return;
+                                }
+                                // When the session is ready, we start displaying the preview.
+                                mCaptureSession = cameraCaptureSession;
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession cameraCaptureSession) {
+                            showToast("Failed to configure camera.");
+                        }
+                    }, mBackgroundHandler
+            );
+            */
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
         }
-    };
+    }
 
     public static Camera2RawFragment newInstance() {
         return new Camera2RawFragment();
@@ -608,222 +754,6 @@ public class Camera2RawFragment extends Fragment
         ErrorDialog.buildErrorDialog("This device doesn't support capturing RAW photos").
                 show(getFragmentManager(), "dialog");
         return false;
-    }
-
-    /**
-     * Opens the camera specified by {@link #mCameraId}.
-     */
-    private void openCamera() {
-        if (!setUpCameraOutputs()) {
-            return;
-        }
-        if (!hasAllPermissionsGranted()) {
-            requestCameraPermissions();
-            return;
-        }
-
-        Activity activity = getActivity();
-        CameraManager manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
-        try {
-            // Wait for any previously running session to finish.
-            if (!mCameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
-                throw new RuntimeException("Time out waiting to lock camera opening.");
-            }
-
-            String cameraId;
-            Handler backgroundHandler;
-            synchronized (mCameraStateLock) {
-                cameraId = mCameraId;
-                backgroundHandler = mBackgroundHandler;
-            }
-
-            // Attempt to open the camera. mStateCallback will be called on the background handler's
-            // thread when this succeeds or fails.
-            manager.openCamera(cameraId, mStateCallback, backgroundHandler);
-        } catch (CameraAccessException e) {
-            e.printStackTrace();
-        } catch (InterruptedException e) {
-            throw new RuntimeException("Interrupted while trying to lock camera opening.", e);
-        }
-    }
-
-    /**
-     * Requests permissions necessary to use camera and save pictures.
-     */
-    private void requestCameraPermissions() {
-        if (shouldShowRationale()) {
-            PermissionConfirmationDialog.newInstance().show(getChildFragmentManager(), "dialog");
-        } else {
-            FragmentCompat.requestPermissions(this, CAMERA_PERMISSIONS, REQUEST_CAMERA_PERMISSIONS);
-        }
-    }
-
-    /**
-     * Tells whether all the necessary permissions are granted to this app.
-     *
-     * @return True if all the required permissions are granted.
-     */
-    private boolean hasAllPermissionsGranted() {
-        for (String permission : CAMERA_PERMISSIONS) {
-            if (ActivityCompat.checkSelfPermission(getActivity(), permission)
-                    != PackageManager.PERMISSION_GRANTED) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Gets whether you should show UI with rationale for requesting the permissions.
-     *
-     * @return True if the UI should be shown.
-     */
-    private boolean shouldShowRationale() {
-        for (String permission : CAMERA_PERMISSIONS) {
-            if (FragmentCompat.shouldShowRequestPermissionRationale(this, permission)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Shows that this app really needs the permission and finishes the app.
-     */
-    private void showMissingPermissionError() {
-        Activity activity = getActivity();
-        if (activity != null) {
-            Toast.makeText(activity, R.string.request_permission, Toast.LENGTH_SHORT).show();
-            activity.finish();
-        }
-    }
-
-    /**
-     * Closes the current {@link CameraDevice}.
-     */
-    private void closeCamera() {
-        try {
-            mCameraOpenCloseLock.acquire();
-            synchronized (mCameraStateLock) {
-
-                // Reset state and clean up resources used by the camera.
-                // Note: After calling this, the ImageReaders will be closed after any background
-                // tasks saving Images from these readers have been completed.
-                mPendingUserCaptures = 0;
-                mState = STATE_CLOSED;
-                if (null != mCaptureSession) {
-                    mCaptureSession.close();
-                    mCaptureSession = null;
-                }
-                if (null != mCameraDevice) {
-                    mCameraDevice.close();
-                    mCameraDevice = null;
-                }
-                if (null != mRawImageReader) {
-                    mRawImageReader.close();
-                    mRawImageReader = null;
-                }
-                if( null != mImageWriter) {
-                    mImageWriter.close();
-                    mImageWriter = null;
-                }
-            }
-        } catch (InterruptedException e) {
-            throw new RuntimeException("Interrupted while trying to lock camera closing.", e);
-        } finally {
-            mCameraOpenCloseLock.release();
-        }
-    }
-
-    /**
-     * Starts a background thread and its {@link Handler}.
-     */
-    private void startBackgroundThread() {
-        mBackgroundThread = new HandlerThread("CameraBackground");
-        mBackgroundThread.start();
-        synchronized (mCameraStateLock) {
-            mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
-        }
-    }
-
-    /**
-     * Stops the background thread and its {@link Handler}.
-     */
-    private void stopBackgroundThread() {
-        mBackgroundThread.quitSafely();
-        try {
-            mBackgroundThread.join();
-            mBackgroundThread = null;
-            synchronized (mCameraStateLock) {
-                mBackgroundHandler = null;
-            }
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-    }
-
-    /**
-     * Creates a new {@link CameraCaptureSession} for camera preview.
-     * <p/>
-     * Call this only with {@link #mCameraStateLock} held.
-     */
-    private void createCameraPreviewSessionLocked() {
-        try {
-            SurfaceTexture texture = mTextureView.getSurfaceTexture();
-            // We configure the size of default buffer to be the size of camera preview we want.
-            texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
-
-            // This is the output Surface we need to start preview.
-            Surface surface = new Surface(texture);
-
-            // We set up a CaptureRequest.Builder with the output Surface.
-            mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-            //mPreviewRequestBuilder.addTarget(surface);
-            mPreviewRequestBuilder.addTarget(mRawImageReader.get().getSurface());
-
-            // Here, we create a CameraCaptureSession for camera preview.
-            mCameraDevice.createCaptureSession(Arrays.asList(surface,
-                            mRawImageReader.get().getSurface()), new CameraCaptureSession.StateCallback() {
-                        @Override
-                        public void onConfigured(CameraCaptureSession cameraCaptureSession) {
-                            synchronized (mCameraStateLock) {
-                                // The camera is already closed
-                                if (null == mCameraDevice) {
-                                    return;
-                                }
-
-                                try {
-                                    setup3AControlsLocked(mPreviewRequestBuilder);
-                                    // Finally, we start displaying the camera preview.
-                                    cameraCaptureSession.setRepeatingRequest(
-                                            mPreviewRequestBuilder.build(),
-                                            mPreCaptureCallback, mBackgroundHandler);
-                                    mState = STATE_PREVIEW;
-                                } catch (CameraAccessException | IllegalStateException e) {
-                                    e.printStackTrace();
-                                    return;
-                                }
-                                // When the session is ready, we start displaying the preview.
-                                mCaptureSession = cameraCaptureSession;
-                            }
-                        }
-
-                        @Override
-                        public void onConfigureFailed(CameraCaptureSession cameraCaptureSession) {
-                            showToast("Failed to configure camera.");
-                        }
-                    }, mBackgroundHandler
-            );
-            try {
-                mImageWriter =  ImageWriter.newInstance(surface,5);
-            } catch (IllegalStateException e) {
-                e.printStackTrace();
-            }
-        } catch (CameraAccessException e) {
-            e.printStackTrace();
-        }
-
-
     }
 
     /**
@@ -1122,89 +1052,13 @@ public class Camera2RawFragment extends Fragment
         }
     }
 
-    /**
-     * Retrieve the next {@link Image} from a reference counted {@link ImageReader}, retaining
-     * that {@link ImageReader} until that {@link Image} is no longer in use, and set this
-     * {@link Image} as the result for the next request in the queue of pending requests.  If
-     * all necessary information is available, begin saving the image to a file in a background
-     * thread.
-     *
-     * @param pendingQueue the currently active requests.
-     * @param reader       a reference counted wrapper containing an {@link ImageReader} from which
-     *                     to acquire an image.
-     */
-    private void dequeueAndSaveImage(TreeMap<Integer, ImageSaver.ImageSaverBuilder> pendingQueue,
-                                     RefCountedAutoCloseable<ImageReader> reader) {
-        synchronized (mCameraStateLock) {
-
-
-            // Increment reference count to prevent ImageReader from being closed while we
-            // are saving its Images in a background thread (otherwise their resources may
-            // be freed while we are writing to a file).
-            if (reader == null || reader.getAndRetain() == null) {
-                Log.e(TAG, "Paused the activity before we could save the image," +
-                        " ImageReader already closed.");
-  //              pendingQueue.remove(entry.getKey());
-                return;
-            }
-
-            Image image;
-            try {
-                image = reader.get().acquireLatestImage();
-            } catch (IllegalStateException e) {
-                Log.e(TAG, "Too many images queued for saving, dropping image for request: ");
-//                        entry.getKey());
-//                pendingQueue.remove(entry.getKey());
-                return;
-            }
-//            mImageWriter.queueInputImage(image);
-
-            Image imageInput;
-            try {
-                imageInput = mImageWriter.dequeueInputImage();
-                int format = image.getFormat();
-                int formatInput = imageInput.getFormat();
-                Log.d(TAG, "bob format=" + format + "height="+image.getHeight() + "width="+ image.getWidth());
-                Log.d(TAG, "bob input="+formatInput +"height="+imageInput.getHeight() + "width="+ imageInput.getWidth());
-
-                imageInput.close();
-            } catch (IllegalStateException e) {
-               Log.e(TAG, "Too many images queued for saving, dropping image for request: ");
-            }
-
-
-            image.close();
-            // bob
-//            builder.setRefCountedReader(reader).setImage(image);
-
-//            handleCompletionLocked(entry.getKey(), builder, pendingQueue);
-        }
-    }
 
     private static class ImageSaver implements Runnable {
 
-        /**
-         * The image to save.
-         */
         private final Image mImage;
-        /**
-         * The file we save the image into.
-         */
         private final File mFile;
-
-        /**
-         * The CaptureResult for this image capture.
-         */
         private final CaptureResult mCaptureResult;
-
-        /**
-         * The CameraCharacteristics for this camera device.
-         */
         private final CameraCharacteristics mCharacteristics;
-
-        /**
-         * The Context to use when updating MediaStore with the saved images.
-         */
         private final Context mContext;
 
         /**
@@ -1601,6 +1455,20 @@ public class Camera2RawFragment extends Fragment
     }
 
     /**
+     * A {@link Handler} for showing {@link Toast}s on the UI thread.
+     */
+    private final Handler mMessageHandler = new Handler(Looper.getMainLooper()) {
+        @Override
+        public void handleMessage(Message msg) {
+            Activity activity = getActivity();
+            if (activity != null) {
+                Toast.makeText(activity, (String) msg.obj, Toast.LENGTH_SHORT).show();
+            }
+        }
+    };
+
+
+    /**
      * Shows a {@link Toast} on the UI thread.
      *
      * @param text The message to show.
@@ -1699,4 +1567,154 @@ public class Camera2RawFragment extends Fragment
 
     }
 
+    /**
+     * Opens the camera specified by {@link #mCameraId}.
+     */
+    private void openCamera() {
+        if (!setUpCameraOutputs()) {
+            return;
+        }
+        if (!hasAllPermissionsGranted()) {
+            requestCameraPermissions();
+            return;
+        }
+
+        Activity activity = getActivity();
+        CameraManager manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
+        try {
+            // Wait for any previously running session to finish.
+            if (!mCameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
+                throw new RuntimeException("Time out waiting to lock camera opening.");
+            }
+
+            String cameraId;
+            Handler backgroundHandler;
+            synchronized (mCameraStateLock) {
+                cameraId = mCameraId;
+                backgroundHandler = mBackgroundHandler;
+            }
+
+            // Attempt to open the camera. mStateCallback will be called on the background handler's
+            // thread when this succeeds or fails.
+            manager.openCamera(cameraId, mStateCallback, backgroundHandler);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        } catch (InterruptedException e) {
+            throw new RuntimeException("Interrupted while trying to lock camera opening.", e);
+        }
+    }
+
+    /**
+     * Requests permissions necessary to use camera and save pictures.
+     */
+    private void requestCameraPermissions() {
+        if (shouldShowRationale()) {
+            PermissionConfirmationDialog.newInstance().show(getChildFragmentManager(), "dialog");
+        } else {
+            FragmentCompat.requestPermissions(this, CAMERA_PERMISSIONS, REQUEST_CAMERA_PERMISSIONS);
+        }
+    }
+
+    /**
+     * Tells whether all the necessary permissions are granted to this app.
+     *
+     * @return True if all the required permissions are granted.
+     */
+    private boolean hasAllPermissionsGranted() {
+        for (String permission : CAMERA_PERMISSIONS) {
+            if (ActivityCompat.checkSelfPermission(getActivity(), permission)
+                    != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Gets whether you should show UI with rationale for requesting the permissions.
+     *
+     * @return True if the UI should be shown.
+     */
+    private boolean shouldShowRationale() {
+        for (String permission : CAMERA_PERMISSIONS) {
+            if (FragmentCompat.shouldShowRequestPermissionRationale(this, permission)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Shows that this app really needs the permission and finishes the app.
+     */
+    private void showMissingPermissionError() {
+        Activity activity = getActivity();
+        if (activity != null) {
+            Toast.makeText(activity, R.string.request_permission, Toast.LENGTH_SHORT).show();
+            activity.finish();
+        }
+    }
+
+
+
+    /**
+     * Starts a background thread and its {@link Handler}.
+     */
+    private void startBackgroundThread() {
+        mBackgroundThread = new HandlerThread("CameraBackground");
+        mBackgroundThread.start();
+        synchronized (mCameraStateLock) {
+            mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
+        }
+    }
+
+    /**
+     * Stops the background thread and its {@link Handler}.
+     */
+    private void stopBackgroundThread() {
+        mBackgroundThread.quitSafely();
+        try {
+            mBackgroundThread.join();
+            mBackgroundThread = null;
+            synchronized (mCameraStateLock) {
+                mBackgroundHandler = null;
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void closeCamera() {
+        try {
+            mCameraOpenCloseLock.acquire();
+            synchronized (mCameraStateLock) {
+
+                // Reset state and clean up resources used by the camera.
+                // Note: After calling this, the ImageReaders will be closed after any background
+                // tasks saving Images from these readers have been completed.
+                mPendingUserCaptures = 0;
+                mState = STATE_CLOSED;
+                if (null != mCaptureSession) {
+                    mCaptureSession.close();
+                    mCaptureSession = null;
+                }
+                if (null != mCameraDevice) {
+                    mCameraDevice.close();
+                    mCameraDevice = null;
+                }
+                if (null != mRawImageReader) {
+                    mRawImageReader.close();
+                    mRawImageReader = null;
+                }
+                if( null != mImageWriter) {
+                    mImageWriter.close();
+                    mImageWriter = null;
+                }
+            }
+        } catch (InterruptedException e) {
+            throw new RuntimeException("Interrupted while trying to lock camera closing.", e);
+        } finally {
+            mCameraOpenCloseLock.release();
+        }
+    }
 }
