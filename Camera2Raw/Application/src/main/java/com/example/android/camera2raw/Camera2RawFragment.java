@@ -55,6 +55,13 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Toast;
 
+//import com.android.ex.camera2;
+import com.android.ex.camera2.blocking.BlockingCameraManager;
+//import com.android.ex.camera2.blocking.BlockingCameraManager.BlockingOpenException;
+//import com.android.ex.camera2.blocking.BlockingStateCallback;
+//import com.android.ex.camera2.blocking.BlockingSessionCallback;
+
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -70,6 +77,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -206,25 +214,9 @@ public class Camera2RawFragment extends Fragment
      * A {@link CameraCaptureSession } for camera preview.
      */
     private CameraCaptureSession mCaptureSession;
-
-    /**
-     * A reference to the open {@link CameraDevice}.
-     */
     private CameraDevice mCameraDevice;
-
-    /**
-     * The {@link Size} of camera preview.
-     */
     private Size mPreviewSize;
-
-    /**
-     * The {@link CameraCharacteristics} for the currently configured camera device.
-     */
     private CameraCharacteristics mCharacteristics;
-
-    /**
-     * A {@link Handler} for running tasks in the background.
-     */
     private Handler mBackgroundHandler;
 
     /**
@@ -391,6 +383,8 @@ public class Camera2RawFragment extends Fragment
 
     };
 
+    CaptureCallbackWaiter mPreCaptureCallback = new CaptureCallbackWaiter();
+/*
     private CameraCaptureSession.CaptureCallback mPreCaptureCallback
             = new CameraCaptureSession.CaptureCallback() {
 
@@ -463,7 +457,7 @@ public class Camera2RawFragment extends Fragment
         }
 
     };
-
+*/
     private final CameraCaptureSession.CaptureCallback mCaptureCallback
             = new CameraCaptureSession.CaptureCallback() {
         @Override
@@ -522,9 +516,10 @@ public class Camera2RawFragment extends Fragment
 
             InputConfiguration inputConfig = new InputConfiguration(mPreviewSize.getWidth(),
                     mPreviewSize.getHeight(), ImageFormat.YUV_420_888);
+            BlockingSessionCallback sessionListener = new BlockingSessionCallback();
 
-            mCameraDevice.createReprocessableCaptureSession(inputConfig,
-//            mCameraDevice.createCaptureSession(
+//            mCameraDevice.createReprocessableCaptureSession(inputConfig,
+            mCameraDevice.createCaptureSession(
                     Arrays.asList(surface, mRawImageReader.get().getSurface()), new CameraCaptureSession.StateCallback() {
 
                         @Override
@@ -1717,4 +1712,48 @@ public class Camera2RawFragment extends Fragment
             mCameraOpenCloseLock.release();
         }
     }
+
+
+    private class CaptureCallbackWaiter extends CameraCaptureSession.CaptureCallback {
+        private final LinkedBlockingQueue<TotalCaptureResult> mResultQueue =
+                new LinkedBlockingQueue<>();
+
+        @Override
+        public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request,
+                                     long timestamp, long frameNumber) {
+        }
+
+        @Override
+        public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request,
+                                       TotalCaptureResult result) {
+            try {
+                mResultQueue.put(result);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+        @Override
+        public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request,
+                                    CaptureFailure failure) {
+            Log.e(TAG, "Script error: capture failed");
+        }
+
+        public TotalCaptureResult getResult(long timeoutMs) {
+            TotalCaptureResult result = null;
+            try {
+                result = mResultQueue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
+            if (result == null) {
+                Log.d(TAG, "Getting an image timed out after " + timeoutMs +
+                        "ms");
+            }
+
+            return result;
+        }
+    }
+
 }
